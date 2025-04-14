@@ -254,7 +254,7 @@ class Exporter:
         self.device = select_device("cpu" if self.args.device is None else self.args.device)
 
         # Argument compatibility checks
-        fmt_keys = fmts_dict["Arguments"][flags.index(True) + 1]
+        fmt_keys = fmts_dict["Argument"][flags.index(True) + 1]
         validate_args(fmt, self.args, fmt_keys)
         if imx and not self.args.int8:
             LOGGER.warning("WARNING ⚠️ IMX only supports int8 export, setting int8=True.")
@@ -493,24 +493,71 @@ class Exporter:
         assert Path(f_onnx).exists(), f"failed to export ONNX file: {f_onnx}"
         f = Path(str(self.file).replace(self.file.suffix, f"_axmodel{os.sep}"))
         f_ax = str(self.file.with_suffix(".axmodel"))  # AXERA model file
+        calibration_dataset = Path("./coco_4.tar")
+        if not calibration_dataset.exists():
+            os.system(
+                f'wget --passive-ftp -nd -t 3 -O "{calibration_dataset}" "https://github.com/m5stack/ultralytics/releases/download/v0.0.1-m5stack/coco_4.tar"'
+            )
+        assert calibration_dataset.exists(), f"failed down file: {calibration_dataset}"
+        import json
 
-        name = Path("pulsar2") # PULSAR2 filename
-        pulsar = name if name.is_file() else (ROOT / name)
-        if not pulsar.is_file():
-            LOGGER.error(f"{prefix} ERROR {pulsar} not found.")
-            return f_ax, None
-        args = ["build",
-                "--target_hardware",
-                "AX620E",
-                "--input",
-                f_onnx,
-                "--output_dir",
-                str(f),
-                "--output_name",
-                f_ax,
-                "--config",
-                "config/yolo11n_config.json"
-                ]
+        config_json = {
+            "model_type": "ONNX",
+            "npu_mode": "NPU1",
+            "quant": {
+                "input_configs": [
+                    {
+                        "tensor_name": "images",
+                        "calibration_dataset": str(calibration_dataset),
+                        "calibration_size": 4,
+                        "calibration_mean": [0, 0, 0],
+                        "calibration_std": [255.0, 255.0, 255.0],
+                    }
+                ],
+                "calibration_method": "MinMax",
+                "precision_analysis": False,
+            },
+            "input_processors": [
+                {
+                    "tensor_name": "images",
+                    "tensor_format": "BGR",
+                    "src_format": "BGR",
+                    "src_dtype": "U8",
+                    "src_layout": "NHWC",
+                }
+            ],
+            "output_processors": [],
+            "compiler": {"check": 0},
+        }
+        import onnx as axer_onnx_config
+
+        axer_model = axer_onnx_config.load(f_onnx)
+        output_info = axer_model.graph.output
+        for output in output_info:
+            config_json["output_processors"].append(
+                {"tensor_name": output.name, "dst_perm": [0, 2, 3, 1]}
+            )
+        with open("yolo_config.json", "w") as yolo_config_f:
+            json.dump(config_json, yolo_config_f)
+        # name = Path("pulsar2") # PULSAR2 filename
+        # pulsar = name if name.is_file() else (ROOT / name)
+        # if not pulsar.is_file():
+        #     LOGGER.error(f"{prefix} ERROR {pulsar} not found.")
+        #     return f_ax, None
+        pulsar = "pulsar2"
+        args = [
+            "build",
+            "--target_hardware",
+            "AX620E",
+            "--input",
+            f_onnx,
+            "--output_dir",
+            str(f),
+            "--output_name",
+            f_ax,
+            "--config",
+            "yolo_config.json",
+        ]
 
         cmd = [
             str(pulsar),
@@ -535,10 +582,10 @@ class Exporter:
                     item_path.unlink()  # Remove the file
                 elif item_path.is_dir():
                     import shutil
+
                     shutil.rmtree(item_path)  # Remove the directory
 
         return str(f), None
-
 
     @try_export
     def export_onnx(self, prefix=colorstr("ONNX:")):
